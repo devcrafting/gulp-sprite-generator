@@ -25,7 +25,8 @@ var log = function() {
 var getImages = (function() {
     var httpRegex, imageRegex, filePathRegex, pngRegex, retinaRegex;
 
-    imageRegex    = new RegExp('background-image:[\\s]?url\\(["\']?([\\w\\d\\s!:./\\-\\_@]*\\.[\\w?#]+)["\']?\\)[^;]*\\;(?:\\s*\\/\\*\\s*@meta\\s*(\\{.*\\})\\s*\\*\\/)?', 'ig');
+    //imageRegex    = new RegExp('background-image:[\\s]?url\\(["\']?([\\w\\d\\s!:./\\-\\_@]*\\.[\\w?#]+)["\']?\\)[^;]*\\;(?:\\s*\\/\\*\\s*@meta\\s*(\\{.*\\})\\s*\\*\\/)?', 'ig');
+    imageRegex    = new RegExp('background:[\\s]*url\\(["\']?([\\w\\d\\s!:./\\-\\_@]*\\.[\\w?#]+)["\']?\\)\\s*([^\\s\\;]*\\s*)([^\\s\\;]*\\s*)(no\\-repeat[^\\s\\;]*\\s*)([^\\;]*)\\;(?:\\s*\\/\\*\\s*@meta\\s*(\\{.*\\})\\s*\\*\\/)?(.*)$', 'igm');
     retinaRegex   = new RegExp('@(\\d)x\\.[a-z]{3,4}$', 'ig');
     httpRegex     = new RegExp('http[s]?', 'ig');
     pngRegex      = new RegExp('\\.png$', 'ig');
@@ -45,29 +46,53 @@ var getImages = (function() {
             var matchOperatorsRe = /[|\\/{}()[\]^$+*?.]/g;
 
             return function(str) {
+                if (!str || !str.replace) {
+                    return '';
+                }
                 return str.replace(matchOperatorsRe,  '\\$&');
             }
         })();
-
+        
         while ((reference = imageRegex.exec(content)) != null) {
+            matchedLine = reference[0];
             url   = reference[1];
-            meta  = reference[2];
-
+            initialBackgroundX = reference[2];
+            initialBackgroundY = reference[3];
+            repeat = reference[4];
+            unsupported = reference[5];
+            meta  = reference[6];
+            untilEndOfLine = reference[7];
+            
+            if (unsupported != ''){
+                log(colors.cyan(basename) + ' > WARNING ' + url + ' has an unsupported attribute in background definition !', reference[0]);
+            }
+                                                            
+            var initialBackgroundXParsed = initialBackgroundX.indexOf('left') >= 0 || initialBackgroundX === '' ? 0 : parseInt(initialBackgroundX);
+            var initialBackgroundYParsed = initialBackgroundY.indexOf('top') >= 0 || initialBackgroundY === '' ? 0 : parseInt(initialBackgroundY);
+            if (isNaN(initialBackgroundXParsed) || isNaN(initialBackgroundYParsed)) {
+                log(colors.cyan(basename) + ' > ' + url + ' has been skipped as background is badly formatted for sprite generation (ensure background: [image url] [x-pos] [y-pos] [repeat], with nb px, left and top only for position) !', reference[0]);
+                continue;
+            }
+                        
             image = {
-                replacement: new RegExp('background-image:\\s+url\\(\\s?(["\']?)\\s?' + makeRegexp(url) + '\\s?\\1\\s?\\)[^;]*\\;', 'gi'),
+                matchedLine: matchedLine,
+                replacement: new RegExp('background:[\\s]*url\\(\\s?(["\']?)\\s?' + makeRegexp(url) + '\\s?\\1\\s?\\)\\s?' + makeRegexp(initialBackgroundX) + makeRegexp(initialBackgroundY) + makeRegexp(repeat) + makeRegexp(unsupported) + '\\;' + makeRegexp(meta) + makeRegexp(untilEndOfLine) + '$', 'igm'),
                 url:         url,
+                repeat: repeat,
+                initialBackgroundX: initialBackgroundXParsed,
+                initialBackgroundY: initialBackgroundYParsed,
                 group:       [],
                 isRetina:    false,
                 retinaRatio: 1,
                 meta:        {}
             };
-
+                                    
             if (httpRegex.test(url)) {
                 log(colors.cyan(basename) + ' > ' + url + ' has been skipped as it\'s an external resource!');
                 continue;
             }
 
-            if (!pngRegex.test(url)) {
+            if (!pngRegex.test(url) && options.excludeNotPng) {
                 log(colors.cyan(basename) + ' > ' + url + ' has been skipped as it\'s not a PNG!');
                 continue;
             }
@@ -107,12 +132,12 @@ var getImages = (function() {
 
         // reset lastIndex
         imageRegex.lastIndex = 0;
-
+        
         // remove nulls and duplicates
         images = _.chain(images)
             .filter()
             .unique(function(image) {
-                return image.path;
+                return image.replacement;
             })
             .value();
 
@@ -208,8 +233,10 @@ var callSpriteSmithWith = (function() {
                 var config, ratio;
 
                 config = _.merge({}, options, {
-                    src: _.pluck(images, 'path')
+                    src: _.unique(_.pluck(images, 'path'))
                 });
+                
+                log(config.src);
 
                 // enlarge padding, if its retina
                 if (_.every(images, function(image) {return image.isRetina})) {
@@ -240,8 +267,8 @@ var updateReferencesIn = (function() {
     var template;
 
     template = _.template(
-        'background-image: url("<%= spriteSheetPath %>");\n    ' +
-        'background-position: -<%= isRetina ? (coordinates.x / retinaRatio) : coordinates.x %>px -<%= isRetina ? (coordinates.y / retinaRatio) : coordinates.y %>px;\n    ' +
+        'background: url("<%= spriteSheetPath %>") <%= repeat %>;\n    ' +
+        'background-position: <%= -(isRetina ? (coordinates.x / retinaRatio) : coordinates.x) + initialBackgroundX %>px <%= -(isRetina ? (coordinates.y / retinaRatio) : coordinates.y) + initialBackgroundY %>px;\n    ' +
         'background-size: <%= isRetina ? (properties.width / retinaRatio) : properties.width %>px <%= isRetina ? (properties.height / retinaRatio) : properties.height %>px!important;'
     );
 
@@ -295,41 +322,45 @@ var exportSprites = (function() {
             });
 
             // end stream
-            stream.push(null);
+            //stream.push(null);
 
             return results;
         }
     }
 })();
 
-var exportStylesheet = function(stream, options) {
+var exportStylesheet = function(stream, styleSheetName) {
     return function(content) {
         var stylesheet;
 
         stylesheet = new File({
-            path: options.styleSheetName,
+            path: styleSheetName,
             contents: new Buffer(content)
         });
 
         stream.push(stylesheet);
 
         // end stream
-        stream.push(null);
+        //stream.push(null);
 
-        log('Stylesheet', options.styleSheetName, 'has been created');
+        log('Stylesheet', styleSheetName, 'has been created');
     }
 };
 
 var mapSpritesProperties = function(images, options) {
     return function(results) {
         return results.map(function(result) {
-            return _.map(result.coordinates, function(coordinates, path) {
-                return _.merge(_.find(images, {path: path}), {
-                    coordinates: coordinates,
-                    spriteSheetPath: options.spriteSheetPath ? options.spriteSheetPath + "/" + result.path : result.path,
-                    properties: result.properties
-                });
-            });
+            return _.flatten(
+                _.map(result.coordinates, function(coordinates, path) {
+                    return _.map(
+                        _.where(images, {path: path}), 
+                        function(image) {
+                            return _.merge(image, {
+                                coordinates: coordinates,
+                                spriteSheetPath: options.spriteSheetPath ? options.spriteSheetPath + "/" + result.path : result.path,
+                                properties: result.properties
+                            })});
+                }));
         });
     }
 };
@@ -340,6 +371,7 @@ module.exports = function(options) { 'use strict';
     options = _.merge({
         src:        [],
         engine:     "pngsmith", //auto
+        excludeNotPng: true,
         algorithm:  "top-down",
         padding:    0,
         engineOpts: {},
@@ -378,7 +410,7 @@ module.exports = function(options) { 'use strict';
 
     // add meta skip filter
     options.filter.unshift(function(image) {
-        image.meta.skip && log(image.path + ' has been skipped as it meta declares to skip');
+        image.meta.skip && log(image.matchedLine + ' has been skipped as it meta declares to skip');
         return !image.meta.skip;
     });
 
@@ -427,9 +459,7 @@ module.exports = function(options) { 'use strict';
         if (file.isBuffer()) {
             content = file.contents.toString();
 
-            if (!options.styleSheetName) {
-                options.styleSheetName = path.basename(file.path);
-            }
+            var styleSheetName = options.styleSheetName || path.basename(file.path);
 
             getImages(file, content, options)
                 .then(function(images) {
@@ -437,13 +467,14 @@ module.exports = function(options) { 'use strict';
                         .then(exportSprites(spriteSheetStream, options))
                         .then(mapSpritesProperties(images, options))
                         .then(updateReferencesIn(content))
-                        .then(exportStylesheet(styleSheetStream, options))
+                        .then(exportStylesheet(styleSheetStream, styleSheetName))
                         .then(function() {
                             // pipe source file
                             stream.push(file);
                             done();
                         })
                         .catch(function(err) {
+                            log('error: '+ err);
                             stream.emit('error', new gutil.PluginError(PLUGIN_NAME, err));
                             done();
                         });
@@ -452,6 +483,7 @@ module.exports = function(options) { 'use strict';
 
             return null;
         } else {
+            log('error: file is not a buffer');
             this.emit('error', new gutil.PluginError(PLUGIN_NAME, 'Something went wrong!'));
             return done();
         }
